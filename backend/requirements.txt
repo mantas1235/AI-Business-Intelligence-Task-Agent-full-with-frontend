@@ -1,0 +1,22 @@
+
+# Web framework ir serveris
+fastapi
+uvicorn
+python-multipart
+
+# Duomenų apdorojimas ir vizualizacija
+pandas
+matplotlib
+
+# AI ir konfigūracija
+openai
+python-dotenv
+
+# Duomenų bazė (ORM)
+sqlalchemy
+
+# Saugumas ir Rate Limiting
+slowapi
+
+# Pydantic validacija (FastAPI dalis, bet gera praktika turėti čia)
+pydantic

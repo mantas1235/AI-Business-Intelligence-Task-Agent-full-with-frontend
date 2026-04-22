@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.local
+*.env.local
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime-generated data (should not be in git)
+backend/sessions.db
+backend/uploads/
+backend/static/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/.env
+frontend/.env.local
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
