@@ -25,6 +25,10 @@ export async function listFiles(signal?: AbortSignal): Promise<FileEntry[]> {
   return res.data;
 }
 
+export async function deleteFile(fileId: string, signal?: AbortSignal): Promise<void> {
+  await api.delete(`/delete-file/${encodeURIComponent(fileId)}`, { signal });
+}
+
 export async function sendChat(
   fileId: string,
   question: string,

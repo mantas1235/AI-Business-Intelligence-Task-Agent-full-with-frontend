@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import clsx from 'clsx';
 import type { FileEntry, UploadResponse } from '../types';
 import UploadButton from './UploadButton';
@@ -9,6 +10,7 @@ interface SidebarProps {
   loading: boolean;
   error: string | null;
   onSelect: (fileId: string) => void;
+  onDelete: (fileId: string) => void;
   onUploaded: (res: UploadResponse) => void;
   onRefresh: () => void;
   open: boolean;
@@ -30,11 +32,18 @@ export default function Sidebar({
   loading,
   error,
   onSelect,
+  onDelete,
   onUploaded,
   onRefresh,
   open,
   onClose,
 }: SidebarProps) {
+  const handleDeleteClick = (e: ReactMouseEvent, file: FileEntry) => {
+    e.stopPropagation();
+    if (window.confirm(`Ištrinti failą „${file.original_name}"?`)) {
+      onDelete(file.file_id);
+    }
+  };
   return (
     <>
       {open && (
@@ -96,23 +105,51 @@ export default function Sidebar({
               const active = f.file_id === activeFileId;
               return (
                 <li key={f.file_id}>
-                  <button
-                    type="button"
-                    onClick={() => onSelect(f.file_id)}
+                  <div
                     className={clsx(
-                      'w-full truncate rounded-md px-3 py-2 text-left text-sm transition',
+                      'group flex items-center gap-1 rounded-md pr-1 transition',
                       active
-                        ? 'bg-brand-600/20 text-brand-50 ring-1 ring-brand-600/40'
-                        : 'text-slate-300 hover:bg-slate-800',
+                        ? 'bg-brand-600/20 ring-1 ring-brand-600/40'
+                        : 'hover:bg-slate-800',
                     )}
-                    title={f.original_name}
-                    aria-current={active ? 'page' : undefined}
                   >
-                    <span className="block truncate font-medium">{f.original_name}</span>
-                    <span className="mt-0.5 block truncate text-[10px] text-slate-500">
-                      {formatWhen(f.created_at)}
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelect(f.file_id)}
+                      className={clsx(
+                        'min-w-0 flex-1 truncate rounded-md px-3 py-2 text-left text-sm',
+                        active ? 'text-brand-50' : 'text-slate-300',
+                      )}
+                      title={f.original_name}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      <span className="block truncate font-medium">{f.original_name}</span>
+                      <span className="mt-0.5 block truncate text-[10px] text-slate-500">
+                        {formatWhen(f.created_at)}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeleteClick(e, f)}
+                      className="shrink-0 rounded p-1 text-slate-500 opacity-0 transition hover:bg-rose-500/10 hover:text-rose-400 focus:opacity-100 group-hover:opacity-100"
+                      aria-label={`Delete ${f.original_name}`}
+                      title="Ištrinti failą"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        className="h-4 w-4"
+                        aria-hidden="true"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M8.75 1a.75.75 0 0 0-.75.75V3H4.25a.75.75 0 0 0 0 1.5h.312l.738 11.07A2.25 2.25 0 0 0 7.547 17.75h4.906a2.25 2.25 0 0 0 2.247-2.18l.738-11.07h.312a.75.75 0 0 0 0-1.5H12V1.75a.75.75 0 0 0-.75-.75h-2.5ZM10.5 3h-1v-.5h1V3ZM8.5 7.75a.75.75 0 0 1 1.5 0v6a.75.75 0 0 1-1.5 0v-6Zm3.25-.75a.75.75 0 0 0-.75.75v6a.75.75 0 0 0 1.5 0v-6a.75.75 0 0 0-.75-.75Z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                    </button>
+                  </div>
                 </li>
               );
             })}

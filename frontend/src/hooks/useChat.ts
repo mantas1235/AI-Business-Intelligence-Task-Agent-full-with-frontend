@@ -76,7 +76,7 @@ export function useChat(fileId: string | null) {
                   ...m,
                   pending: false,
                   content: res.ai_answer ?? '',
-                  chartUrl: res.chart_url,
+                  chartUrl: res.chartUrl ?? undefined,
                 }
               : m,
           ),

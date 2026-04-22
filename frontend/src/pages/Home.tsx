@@ -9,7 +9,7 @@ import type { UploadResponse } from '../types';
 
 export default function Home() {
   const { activeFileId, select } = useSession();
-  const { files, loading, error, refresh, addFileOptimistic } = useFiles();
+  const { files, loading, error, refresh, addFileOptimistic, deleteFile } = useFiles();
   const { messages, sending, error: chatError, send, cancel } = useChat(activeFileId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -42,6 +42,15 @@ export default function Home() {
     setSidebarOpen(false);
   };
 
+  const handleDelete = async (fileId: string) => {
+    try {
+      await deleteFile(fileId);
+      if (activeFileId === fileId) select(null);
+    } catch {
+      // error surfaced via useFiles state
+    }
+  };
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-slate-950">
       <Sidebar
@@ -50,6 +59,7 @@ export default function Home() {
         loading={loading}
         error={error}
         onSelect={handleSelect}
+        onDelete={handleDelete}
         onUploaded={handleUploaded}
         onRefresh={() => void refresh()}
         open={sidebarOpen}

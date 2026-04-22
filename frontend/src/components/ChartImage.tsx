@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Maximize2, Download, X } from 'lucide-react';
+import { API_BASE_URL } from '../api/client';
 
 interface ChartImageProps {
   url: string;
@@ -9,8 +10,7 @@ export default function ChartImage({ url }: ChartImageProps) {
   const [isZoomed, setIsZoomed] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Sukonstruojame pilną URL (jei tavo backend veikia localhost:8000)
-  const fullUrl = url.startsWith('http') ? url : `http://127.0.0.1:8000${url}`;
+  const fullUrl = url.startsWith('http') ? url : `${API_BASE_URL}${url}`;
 
   const handleDownload = async () => {
     const response = await fetch(fullUrl);

@@ -260,67 +260,97 @@ async def list_files():
 async def analyze_data(request: AnalysisRequest):
     db = SessionLocal()
     
-    # 1. Ieškome sesijos
-    db_session = db.query(SessionModel).filter(SessionModel.file_id == request.file_id).first()
-    
-    if not db_session:
-        db.close()
-        raise HTTPException(status_code=404, detail="Failas DB nerastas.")
-
-    # 2. Išpakuojame stulpelius ir istoriją
-    columns = json.loads(db_session.columns_json)
-    history = json.loads(db_session.history_json)
-    file_path = db_session.storage_path
-    
-    # Paruošiame stulpelius prompt'ui
-    lowered_cols = [c.lower() for c in columns]
-
-    # 3. Skaitome duomenis
-    df = pd.read_csv(file_path)
-    df.columns = [c.lower() for c in df.columns]
-
-    # Sukuriame kategorijų pavyzdžius iš teksto stulpelių (iki 10 unikalių reikšmių)
-    categorical_samples = {}
-    for col in df.select_dtypes(include=["object", "category"]).columns:
-        uniques = df[col].dropna().astype(str).unique().tolist()
-        categorical_samples[col] = uniques[:10]
-
     try:
+        # 1. Ieškome sesijos
+        db_session = db.query(SessionModel).filter(SessionModel.file_id == request.file_id).first()
+        
+        if not db_session:
+            raise HTTPException(status_code=404, detail="Failas DB nerastas.")
+
+        # 2. Išpakuojame istoriją (apsauga, jei failas naujas ir istorijos dar nėra)
+        history = json.loads(db_session.history_json) if db_session.history_json else []
+        file_path = db_session.storage_path
+        
+        # 3. Skaitome duomenis ir paruošiame stulpelius
+        df = pd.read_csv(file_path)
+        df.columns = [c.lower() for c in df.columns]
+
+        # Sukuriame kategorijų pavyzdžius (sumažinau iki 5, kad neapkrautume AI pertekline informacija)
+        categorical_samples = {}
+        for col in df.select_dtypes(include=["object", "category"]).columns:
+            uniques = df[col].dropna().astype(str).unique().tolist()
+            categorical_samples[col] = uniques[:5]
+
+        # PRIDĖTA: Paimame tikrą duomenų pavyzdį, kad AI matytų formatus (datos, valiutos)
+        data_sample = df.head(3).to_string()
+
+        # ETAPAS A: Kodo generavimas
+   # Ištraukiame paskutines 4 žinutes iš istorijos, kad programuotojas turėtų kontekstą
+        recent_history_text = ""
+        if history:
+            recent_history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history[-6:]])
+
+        # ETAPAS A: Kodo generavimas su KONTEKSTU
         prompt_for_code = f"""
-        Tu esi tikslus programuotojas. Duomenų rėmas vadinasi 'df'.
-        Stulpeliai: {', '.join(df.columns)}
-        Kategorijų pavyzdžiai (naudok TIK šias reikšmes filtravimui): {categorical_samples}
+        You are an expert Python data scientist. The DataFrame is named 'df'.
+        
+        DATA STRUCTURE:
+        Columns: {', '.join(df.columns)}
+        Sample Data:
+        {data_sample}
+        Category Examples: {categorical_samples}
 
-        Vartotojo klausimas: "{request.question}"
+        CONVERSATION HISTORY (Crucial for context):
+        {recent_history_text if recent_history_text else "No prior context."}
 
-        TAISYKLĖS:
-        1. Jei klausime minimas regionas ar kategorija, surask atitikmenį viršuje pateiktuose pavyzdžiuose.
-        2. Parašyk TIK vieną Python kodo eilutę, kuri apskaičiuoja atsakymą ir jį atspausdina su print().
-        3. Rezultatas turi būti TIK skaičius arba trumpas tekstas.
+        CURRENT QUESTION: "{request.question}"
+
+        RULES:
+         1. Write pure, executable Python code to calculate the answer and print() it. You MAY use multiple lines. Ensure correct Python indentation. NEVER wrap the code in markdown blocks (do not use ```python).
+        2. If the CURRENT QUESTION is a short follow-up (e.g., "what about North?", "maybe X?"), apply the analytical logic from the PREVIOUS question to the new filter. Do not just sum; perform the exact same analysis on the new category.
+        3. Use `.str.contains('text', case=False, na=False)` for text filtering.
+        4. Output ONLY the code. No markdown.
+        5. DEFENSIVE CODING: Before plotting a chart or accessing elements by index, you MUST check if the filtered DataFrame is empty. Use an if/else block (e.g., `if df_filtered.empty: print("ERROR: No data found for this request")`). NEVER attempt to access `.iloc[0]`, `.index[0]`, or plot a chart from an unchecked or empty DataFrame.
         """
+        
         code_res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt_for_code}]
         )
         generated_code = code_res.choices[0].message.content.strip().replace("```python", "").replace("```", "")
+        
+        # PRIDĖTA: Logginimas, kad konsolėje matytum, ką AI sugalvojo
+        logger.info(f"[ANALYZE] Sugeneruotas kodas: {generated_code}")
 
-        # ETAPAS B: Vykdymas
-        calculation_result = run_python_code(generated_code, df)
+        # ETAPAS B: Vykdymas (Apsaugotas try-except bloku)
+        try:
+            calculation_result = run_python_code(generated_code, df)
+            logger.info(f"[ANALYZE] Kodo rezultatas: {calculation_result}")
+        except Exception as code_err:
+            logger.error(f"[ANALYZE] Kodo klaida: {code_err}")
+            # Jei kodas lūžta, perduodame klaidą AI, kad jis nemeluotų!
+            calculation_result = f"KLAIDA: Nepavyko apskaičiuoti. Sistemos pranešimas: {str(code_err)}"
+
+        # PRIDĖTA: Anti-haliucinacinis saugiklis
+        validation_note = ""
+        if not str(calculation_result).strip() or str(calculation_result).strip() in ["0", "0.0", "None", "[]", "Series([], )"]:
+            validation_note = "DĖMESIO: Rezultatas yra 0, tuščias arba nerastas. Privalai pasakyti vartotojui, kad duomenų pagal šią užklausą nėra."
 
         # ETAPAS C: Atsakymas su istorija
-        # Vietoj get_contextual_messages naudojame tiesioginį sąrašą
         messages = [
-        {"role": "system", "content": """Tu esi griežtas duomenų analitikas. 
-        Tavo taisyklės:
-        1. Atsakyk TIK remdamasis 'Kodo rezultatu'. 
-        2. Jei rezultatas yra 0 ar tuščias, o vartotojas klausia apie pardavimus - sakyk, kad duomenų nėra arba jie klaidingi.
-        3. Niekada nesugalvok skaičių pats. 
-        4. Jei matai prieštaravimą tarp istorijos ir naujo rezultato, pasitikėk NAUJU rezultatu."""}
-    ]
-        messages.extend(history[-4:]) # Ribojame istoriją iki 4 žinučių, kad AI nepasimestų
+            {"role": "system", "content": """You are a strict and precise data analyst. 
+            RULES:
+            1. Answer ONLY using the provided 'Code execution result'. 
+            2. NEVER use numbers or data from the Conversation History to answer the Current Question. History is only for context understanding.
+            3. If the Code result is an error or 0, state that the calculation failed or data is missing. Do NOT invent an answer.
+            4. STRICT LANGUAGE RULE: You MUST formulate your final response in the EXACT SAME LANGUAGE as the user's CURRENT QUESTION. If the question is in English, reply in English.
+            """}
+        ]
+        
+        messages.extend(history[-6:]) 
         messages.append({
             "role": "user", 
-            "content": f"Vartotojo klausimas: {request.question}. Kodo vykdymo rezultatas: {calculation_result}. Suformuluok tikslų atsakymą."
+            "content": f"CURRENT QUESTION: {request.question}\nCODE EXECUTION RESULT: {calculation_result}\n{validation_note}\n\nProvide the final answer."
         })
 
         final_response = client.chat.completions.create(
@@ -339,12 +369,15 @@ async def analyze_data(request: AnalysisRequest):
         
         return {
             "ai_answer": ai_answer,
+            "chartUrl": None, # PRIDĖTA: Kad React MessageBubble nesulūžtų ieškodamas šio lauko
             "history_depth": len(history)
         }
 
+    except HTTPException:
+        raise # Leidžiame 404 klaidai pereiti įprastai
     except Exception as e:
-        logger.error(f"Analizės klaida: {e}")
-        raise HTTPException(status_code=500, detail="Klaida apdorojant duomenis.")
+        logger.error(f"Analizės kritinė klaida: {e}")
+        raise HTTPException(status_code=500, detail=f"Sistemos klaida: {str(e)}")
     finally:
         db.close()
 
@@ -367,65 +400,103 @@ async def test_code(file_id: str, code: str):
 @app.post("/generate-chart")
 async def generate_chart(request_data: AnalysisRequest, request: Request):
     db = SessionLocal()
-    db_session = db.query(SessionModel).filter(SessionModel.file_id == request_data.file_id).first()
     
-    if not db_session:
-        db.close()
-        raise HTTPException(status_code=404, detail="Failas nerastas.")
-
-    # 1. PASIIMAME ISTORIJĄ
-    history = json.loads(db_session.history_json)
-    file_path = db_session.storage_path
-    
-    df = pd.read_csv(file_path)
-    df.columns = [c.lower() for c in df.columns]
-
-    # Iš anksto nustatome tikslų išsaugojimo kelią, kad AI grąžintų teisingą failą
-    chart_filename = f"{uuid.uuid4()}.png"
-    chart_path = os.path.join(STATIC_DIR, chart_filename)
-    chart_path_for_code = chart_path.replace("\\", "/")  # saugu Windows/Linux
-
-    # 2. SUDEDAME KONTEKSTĄ (Istorija + Dabartinis prašymas)
-    messages = [{"role": "system", "content": "Tu esi grafikos ekspertas."}]
-    messages.extend(history[-5:]) # Pridedame praeitį
-
-    prompt_for_chart = f"""
-    Remdamasis praeitais klausimais ir šiuo: "{request_data.question}",
-    parašyk Python kodą (plt).
-    Duomenys: df su stulpeliais {', '.join(df.columns)}.
-    Kodas PRIVALO baigtis šiomis eilutėmis (tiksliai šis kelias):
-    plt.savefig('{chart_path_for_code}')
-    plt.close()
-    Grąžink TIK kodą.
-    """
-    messages.append({"role": "user", "content": prompt_for_chart})
-
     try:
+        db_session = db.query(SessionModel).filter(SessionModel.file_id == request_data.file_id).first()
+        
+        # 1. SAUGUMO PATIKRA (Privalo būti PIRMA!)
+        if not db_session:
+            raise HTTPException(status_code=404, detail="Failas nerastas.")
+
+        # 2. IŠPAKUOJAME ISTORIJĄ IR KONTEKSTĄ
+        history = json.loads(db_session.history_json) if db_session.history_json else []
+        recent_history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history[-6:]])
+        
+        file_path = db_session.storage_path
+        df = pd.read_csv(file_path)
+        df.columns = [c.lower() for c in df.columns]
+
+        # PRIDĖTA: Sukuriame categorical_samples (be šito tavo prompt'as neveiks)
+        categorical_samples = {}
+        for col in df.select_dtypes(include=["object", "category"]).columns:
+            uniques = df[col].dropna().astype(str).unique().tolist()
+            categorical_samples[col] = uniques[:5]
+
+        # Iš anksto nustatome tikslų išsaugojimo kelią
+        chart_filename = f"{uuid.uuid4()}.png"
+        chart_path = os.path.join(STATIC_DIR, chart_filename)
+        # Šis kintamasis turi būti perduotas į tavo run_python_code, kad matplotlib žinotų, kur saugoti
+        chart_path_for_code = chart_path.replace("\\", "/") 
+
+        # 3. SUDEDAME KONTEKSTĄ (Istorija + Dabartinis prašymas)
+        messages = [{"role": "system", "content": "Tu esi grafikos ekspertas."}]
+        messages.extend(history[-5:]) 
+
+        prompt_for_chart = f"""
+        You are an expert in data visualization. The DataFrame is named 'df'.
+        
+        DATA STRUCTURE:
+        Columns: {', '.join(df.columns)}
+        Category Examples: {categorical_samples}
+
+        CONVERSATION HISTORY (CRITICAL FOR CONTEXT!):
+        {recent_history_text if recent_history_text else "No prior context."}
+
+        CURRENT REQUEST: "{request_data.question}"
+
+        RULES:
+        1. If the user asks for a chart in general terms (e.g., "draw a chart", "can you give me a chart?"), you MUST read the CONVERSATION HISTORY to understand the context.
+        2. If a specific product (e.g., "laptops"), region, or filter was discussed in the history, your Python code MUST filter 'df' for that specific subset before plotting. NEVER plot all data if the conversation was about a specific part.
+        3. Write pure, executable Python code using matplotlib and save the chart to this exact path: '{chart_path_for_code}'. You MAY use multiple lines. Ensure correct Python indentation. NEVER wrap the code in markdown blocks (do not use ```python).
+        4. DEFENSIVE CODING: Before plotting, you MUST check if the filtered DataFrame is empty. Use an if/else block (e.g., `if df_filtered.empty: print("ERROR: No data found for this chart") else: plt.savefig(...)`).
+        """
+        messages.append({"role": "user", "content": prompt_for_chart})
+
+        # Generuojame Python kodą
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages # Siunčiame visą paketą
+            messages=messages
         )
         chart_code = response.choices[0].message.content.strip().replace("```python", "").replace("```", "")
 
+        # PRIDĖK ŠIĄ EILUTĘ ČIA PAT:
+        logger.info(f"[CHART] Sugeneruotas Python kodas grafiko braižymui:\n{chart_code}")
+        # (Jei nenaudoji logger, tiesiog rašyk: print(f"[CHART] ... {chart_code}"))
+        
+        # Toliau tavo kodas tęsiasi:
         run_python_code(chart_code, df)
 
         # Patikriname, ar grafikas tikrai sugeneruotas
         if not os.path.exists(chart_path):
             raise HTTPException(status_code=500, detail="Grafikas nebuvo sugeneruotas.")
 
-        # 3. ĮRAŠOME Į ISTORIJĄ, KAD ŽINOTUME, JOG PIEŠĖME
+        # =====================================================================
+        # 4. DINAMINIS ATSAKYMAS (Štai čia generuojamas tekstas pagal kalbą)
+        # =====================================================================
+        response_msg = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a data assistant. The chart has been successfully generated. Tell the user exactly ONE short sentence that the chart is ready. CRITICAL: You MUST use the exact same language as the user's request."},
+                {"role": "user", "content": request_data.question}
+            ]
+        )
+        ai_answer = response_msg.choices[0].message.content
+
+        # 5. ĮRAŠOME Į ISTORIJĄ
         history.append({"role": "user", "content": request_data.question})
-        history.append({"role": "assistant", "content": f"Sugeneravau grafiką pagal tavo užklausą."})
+        history.append({"role": "assistant", "content": ai_answer})
 
         db_session.history_json = json.dumps(history)
         db.commit()
 
-        base_url = str(request.base_url).rstrip('/')
+        # 6. GRĄŽINAME REZULTATĄ
+        # PASTABA: Naudojame "chartUrl" vietoje "chart_url", kad atitiktų tavo React (Frontend) laukiamą raktą
         return {
-            "chart_url": f"{base_url}/static/{chart_filename}",
-            "ai_answer": "Grafikas paruoštas.",
+            "chartUrl": f"/static/{chart_filename}", 
+            "ai_answer": ai_answer,
             "history_depth": len(history)
         }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -443,45 +514,57 @@ async def chat_endpoint(request_data: AnalysisRequest, request: Request):
     
     if not db_session:
         db.close()
-        logger.warning(f"Bandymas pasiekti neegzistuojantį file_id: {request_data.file_id}")
-        raise HTTPException(status_code=404, detail="Failas duomenų bazėje nerastas. Įkelkite failą iš naujo.")
+        raise HTTPException(status_code=404, detail="Failas duomenų bazėje nerastas.")
     
-    db.close() # Uždarome DB ryšį prieš pradedant ilgą AI procesą
+    # Ištraukiame paskutines 2 žinutes dispečeriui, kad jis suprastų kontekstą
+    history = json.loads(db_session.history_json) if db_session.history_json else []
+    recent_history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history[-2:]])
+    
+    db.close() # Uždarome DB ryšį
 
-    # 2. INTENT RECOGNITION (Ketinimo atpažinimas)
-    # Mes klausiame AI, kurį įrankį naudoti
+    # 2. INTENT RECOGNITION (Ketinimo atpažinimas su istorija)
     routing_prompt = f"""
-    Vartotojo žinutė: "{request_data.question}"
+    CONVERSATION HISTORY:
+    {recent_history_text if recent_history_text else "No prior context."}
+
+    CURRENT USER QUESTION: "{request_data.question}"
     
-    Tavo užduotis yra nuspręsti, koks yra vartotojo ketinimas. 
-    Atsakyk TIK vienu žodžiu:
-    - 'CHART' - jei vartotojas prašo nupiešti, sugeneruoti grafiką, diagramą ar vizualizaciją.
-    - 'ANALYZE' - jei vartotojas klausia apie skaičius, faktus, vidurkius ar prašo analizės.
-    - 'GENERAL' - jei tai pasisveikinimas ar bendras klausimas.
+    TASK: Classify the CURRENT USER QUESTION into exactly one of these categories. Reply with ONLY ONE WORD:
+    - 'CHART' - if the user explicitly asks to draw, plot, visualize, or generate a chart/graph.
+    - 'ANALYZE' - if the user asks about data (e.g., "what product", "best", "how much", "region", "sales", "top", "sum") OR asks a follow-up question related to the data in the CONVERSATION HISTORY.
+    - 'GENERAL' - ONLY if it is a pure greeting (e.g., "hello", "hi", "how are you") with NO relation to data or previous context.
+
+    CRITICAL RULE: If the question contains question words like "what", "best", "which", "how", or refers to data/history in ANY way, it MUST be classified as 'ANALYZE'.
     """
 
     try:
         route_response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "Tu esi dispečeris."},
+            messages=[{"role": "system", "content": "You are a strict traffic router for a BI system. Output only one word."},
                       {"role": "user", "content": routing_prompt}]
         )
         intent = route_response.choices[0].message.content.strip().upper()
         logger.info(f"Atpažintas ketinimas: {intent}")
 
-        # 3. MARŠRUTIZAVIMAS (Routing)
+        # 3. MARŠRUTIZAVIMAS... (toliau tavo senas kodas)
         if "CHART" in intent:
-            # Perduodame request_data IR request objektą (reikalingas base_url)
             return await generate_chart(request_data, request)
             
         elif "ANALYZE" in intent:
-            # Perduodame request_data (analyze_data funkcija nenaudoja request objekto)
             return await analyze_data(request_data)
             
         else:
-            # Bendras atsakymas, jei tai nėra analizė ar grafikas
+            # Bendras atsakymas su griežta kalbos kontrole
+            greeting_response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI data analyst. Briefly greet the user and state that you can analyze data or generate charts. CRITICAL RULE: You MUST respond in the EXACT SAME LANGUAGE as the user's message. If the user writes in English, reply in English. Jei vartotojas rašo lietuviškai, atsakyk lietuviškai."},
+                    {"role": "user", "content": request_data.question}
+                ]
+            )
             return {
-                "ai_answer": "Sveiki! Aš esu jūsų AI analitikas. Galiu suskaičiuoti jūsų duomenų vidurkius arba nupiešti grafiką. Ko pageidautumėte?"
+                "ai_answer": greeting_response.choices[0].message.content,
+                "chartUrl": None
             }
 
     except Exception as e:
@@ -493,32 +576,28 @@ async def chat_endpoint(request_data: AnalysisRequest, request: Request):
 async def delete_file(file_id: str, request: Request):
     db = SessionLocal()
     try:
-        # 1. Patikriname ar failas egzistuoja
-        file_record = db.query(FileRecord).filter(FileRecord.file_id == file_id).first()
-        if not file_record:
+        db_session = db.query(SessionModel).filter(SessionModel.file_id == file_id).first()
+        if not db_session:
             raise HTTPException(status_code=404, detail="Failas nerastas")
 
-        # 2. Fizinis failo šalinimas
-        file_path = os.path.join(UPLOAD_DIR, f"{file_id}.csv")
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        file_path = db_session.storage_path
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError as exc:
+                logger.warning(f"Nepavyko pašalinti {file_path}: {exc}")
 
-        # 3. VALYMAS: Ištriname visą susirašinėjimo istoriją iš DB, susijusią su šiuo file_id
-        # Kadangi 'history_json' saugomas tame pačiame 'FileRecord' (jei taip darei),
-        # jis dings automatiškai ištrynus įrašą. 
-        # Jei turi atskirą lentelę žinutėms - naudok:
-        # db.query(ChatMessage).filter(ChatMessage.file_id == file_id).delete()
-
-        # 4. Įrašo pašalinimas iš DB
-        db.delete(file_record)
+        db.delete(db_session)
         db.commit()
-        
-        logging.info(f"PILNAS VALYMAS: Failas {file_id} ir jo istorija pašalinti.")
+
+        logger.info(f"PILNAS VALYMAS: Failas {file_id} ir jo istorija pašalinti.")
         return {"status": "success", "message": "Failas ir atmintis ištrinti"}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        logging.error(f"Klaida trynimo metu: {e}")
+        logger.error(f"Klaida trynimo metu: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()

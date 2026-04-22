@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { listFiles } from '../api/endpoints';
+import { deleteFile as deleteFileRequest, listFiles } from '../api/endpoints';
 import { toApiError } from '../api/client';
 import type { FileEntry } from '../types';
 
@@ -38,5 +38,18 @@ export function useFiles() {
     });
   }, []);
 
-  return { files, loading, error, refresh, addFileOptimistic };
+  const deleteFile = useCallback(async (fileId: string) => {
+    const previous = files;
+    setError(null);
+    setFiles((prev) => prev.filter((f) => f.file_id !== fileId));
+    try {
+      await deleteFileRequest(fileId);
+    } catch (err) {
+      setFiles(previous);
+      setError(toApiError(err).message);
+      throw err;
+    }
+  }, [files]);
+
+  return { files, loading, error, refresh, addFileOptimistic, deleteFile };
 }

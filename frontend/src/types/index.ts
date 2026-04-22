@@ -16,7 +16,7 @@ export interface FileEntry {
 export interface ChatResponse {
   ai_answer: string;
   history_depth?: number;
-  chart_url?: string;
+  chartUrl?: string | null;
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system';
