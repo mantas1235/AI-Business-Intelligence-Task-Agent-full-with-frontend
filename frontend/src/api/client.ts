@@ -2,7 +2,7 @@ import axios, { AxiosError, AxiosHeaders } from 'axios';
 import type { ApiError } from '../types';
 
 export const API_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+  (import.meta.env.VITE_API_BASE_URL || 'https://ai-bi-agent-api.onrender.com').replace(/\/$/, '');
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
